@@ -1,0 +1,4 @@
+{
+  "name": "matrix_wordclock",
+  "build": { "libArchive": false }
+}
