@@ -60,4 +60,14 @@ inline void buildLit(const Data& d, int h, int m, int offset, std::vector<uint8_
   if (k > 0 && d.hasMarks) { set(d.marks[0]); set(d.marks[k]); }
 }
 
+// Scales the brightness of a packed 0xWWRRGGBB colour. Every channel is multiplied by the same factor
+// (rounded to the nearest value), so hue and saturation stay as close to the original as 8-bit output allows.
+inline uint32_t scaleColor(uint32_t c, uint8_t b) {
+  if (b == 255) return c;
+  uint32_t out = 0;
+  for (int sh = 0; sh < 32; sh += 8)
+    out |= (((((c >> sh) & 0xFF) * b + 127) / 255) & 0xFF) << sh;
+  return out;
+}
+
 } // namespace wordclock
