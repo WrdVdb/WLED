@@ -9,12 +9,13 @@ class MatrixWordClock : public Usermod {
   bool    enabled    = true;
   String  file       = "/clock.json";  // file on the ESP32 LittleFS
   int     ledOffset  = 0;              // first LED of the matrix (if the matrix does not start at LED 0)
-  uint8_t mode       = WORDS_ANIMATED; // 0: words follow the animation, rest black
-                                       // 1: whole matrix follows the animation, words have a fixed colour
-  String  wordColorS = "FFFFFF";       // fixed word colour (RRGGBB), mode 1
-  uint8_t unlit      = 0;              // mode 0: brightness of the non-word LEDs (0 = black, 255 = unchanged)
-  uint8_t bgBright   = 255;            // mode 1: brightness of the animated background (255 = unchanged)
-  uint32_t wordColor = RGBW32(255, 255, 255, 0);  // wordColorS as a WLED colour
+  uint8_t mode       = WORDS_ANIMATED; // 0: the words follow the animation
+                                       // 1: the words have a fixed colour
+  String  wordColorS = "#FFFFFF";      // fixed word colour (#RRGGBB), mode 1
+  uint8_t wordBright = 255;            // word brightness (0-255), both modes
+  uint8_t bgBright   = 0;              // background brightness (0-255), both modes: the background always shows
+                                       // the animation, scaled by this value (0 = black)
+  uint32_t wordColor = RGBW32(255, 255, 255, 0);  // fixed word colour with word brightness applied
 
   // --- state ---
   wordclock::Data data;
@@ -24,12 +25,14 @@ class MatrixWordClock : public Usermod {
 
   static const char _name[];
 
-  static uint32_t parseColor(String t) {
+  // "#RRGGBB" or "RRGGBB" -> 0xRRGGBB (white if invalid)
+  static uint32_t parseRGB(String t) {
     t.trim();
     if (t.startsWith("#")) t = t.substring(1);
-    uint32_t v = 0xFFFFFF;
-    if (t.length() == 6) { char* end; unsigned long x = strtoul(t.c_str(), &end, 16); if (*end == 0) v = (uint32_t)x; }
-    return RGBW32((v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF, 0);
+    if (t.length() != 6) return 0xFFFFFF;
+    char* end;
+    unsigned long x = strtoul(t.c_str(), &end, 16);
+    return (*end == 0) ? (uint32_t)x : 0xFFFFFF;
   }
 
   bool loadFile() {
@@ -75,8 +78,10 @@ class MatrixWordClock : public Usermod {
   void loop() override {}
 
   // Called every frame, after the effects have been drawn.
-  //  mode 0: words keep the animation, all other LEDs go dark (or dim)
-  //  mode 1: every LED keeps the animation, the words are overwritten with the fixed colour
+  //  background LEDs: the animation at background brightness (0 = black), in both modes
+  //  word LEDs, mode 0: the animation at word brightness
+  //  word LEDs, mode 1: the fixed colour at word brightness
+  // Brightness always scales all colour channels by the same factor, so the colour itself is not changed.
   void handleOverlayDraw() override {
     if (!enabled || !ready) return;
     if (toki.getTimeSource() == TOKI_TS_NONE) return;   // no valid time yet: show the normal effects
@@ -89,11 +94,11 @@ class MatrixWordClock : public Usermod {
       lastKey = h * 60 + m;
     }
     for (size_t i = 0; i < len; i++) {
-      if (mode == WORDS_FIXED) {
-        if (lit[i])                strip.setPixelColor(i, wordColor);
-        else if (bgBright < 255)   strip.setPixelColor(i, color_fade(strip.getPixelColor(i), bgBright));
-      } else if (!lit[i]) {
-        strip.setPixelColor(i, unlit ? color_fade(strip.getPixelColor(i), unlit) : 0);
+      if (lit[i]) {
+        if (mode == WORDS_FIXED)      strip.setPixelColor(i, wordColor);
+        else if (wordBright < 255)    strip.setPixelColor(i, wordclock::scaleColor(strip.getPixelColor(i), wordBright));
+      } else if (bgBright < 255) {
+        strip.setPixelColor(i, wordclock::scaleColor(strip.getPixelColor(i), bgBright));
       }
     }
   }
@@ -106,23 +111,26 @@ class MatrixWordClock : public Usermod {
 
   void addToConfig(JsonObject& root) override {
     JsonObject top = root[FPSTR(_name)].to<JsonObject>();
-    top[F("enabled")]   = enabled;
-    top[F("file")]      = file;
+    top[F("enabled")]  = enabled;
+    top[F("file")]     = file;
     top[F("ledOffset")] = ledOffset;
-    top[F("mode")]      = mode;
-    top[F("wordColor")] = wordColorS;
-    top[F("unlit")]     = unlit;
-    top[F("bgBrightness")] = bgBright;
+    top[F("mode")]     = mode;
+    top[F("wordColor")] = wordColorS;            // always "#RRGGBB" so the colour picker can show it
+    top[F("wordBrightness")]       = wordBright;
+    top[F("backgroundBrightness")] = bgBright;
   }
 
-  // Turns the "mode" field into a dropdown on the usermod settings page
+  // Settings page: "mode" as dropdown, "wordColor" as colour picker, brightness limited to 0-255
   void appendConfigData() override {
     oappend(SET_F("dd=addDropdown('MatrixWordClock','mode');"));
-    oappend(SET_F("addOption(dd,'Words follow animation, rest black',0);"));
-    oappend(SET_F("addOption(dd,'Whole matrix follows animation, words fixed colour',1);"));
-    oappend(SET_F("addInfo('MatrixWordClock:wordColor',1,'RRGGBB, mode 1 only');"));
-    oappend(SET_F("addInfo('MatrixWordClock:unlit',1,'mode 0 only: 0 = black');"));
-    oappend(SET_F("addInfo('MatrixWordClock:bgBrightness',1,'mode 1 only: 255 = full animation');"));
+    oappend(SET_F("addOption(dd,'Words follow animation',0);"));
+    oappend(SET_F("addOption(dd,'Words fixed colour',1);"));
+    oappend(SET_F("(function(){var c=document.getElementsByName('MatrixWordClock:wordColor')[0];if(c)c.type='color';"
+                  "['wordBrightness','backgroundBrightness'].forEach(function(k){"
+                  "var e=document.getElementsByName('MatrixWordClock:'+k)[0];if(e){e.min=0;e.max=255;}});})();"));
+    oappend(SET_F("addInfo('MatrixWordClock:wordColor',1,'mode 1 only');"));
+    oappend(SET_F("addInfo('MatrixWordClock:wordBrightness',1,'0-255');"));
+    oappend(SET_F("addInfo('MatrixWordClock:backgroundBrightness',1,'0-255, 0 = black');"));
   }
 
   bool readFromConfig(JsonObject& root) override {
@@ -132,11 +140,14 @@ class MatrixWordClock : public Usermod {
     ok &= getJsonValue(top[F("file")],      file,      String("/clock.json"));
     ok &= getJsonValue(top[F("ledOffset")], ledOffset, 0);
     ok &= getJsonValue(top[F("mode")],      mode,      (uint8_t)WORDS_ANIMATED);
-    ok &= getJsonValue(top[F("wordColor")], wordColorS, String("FFFFFF"));
-    ok &= getJsonValue(top[F("unlit")],     unlit,     (uint8_t)0);
-    ok &= getJsonValue(top[F("bgBrightness")], bgBright, (uint8_t)255);
+    ok &= getJsonValue(top[F("wordColor")], wordColorS, String("#FFFFFF"));
+    ok &= getJsonValue(top[F("wordBrightness")],       wordBright, (uint8_t)255);
+    ok &= getJsonValue(top[F("backgroundBrightness")], bgBright,   (uint8_t)0);
     if (mode > WORDS_FIXED) mode = WORDS_ANIMATED;
-    wordColor = parseColor(wordColorS);
+    uint32_t rgb = parseRGB(wordColorS);
+    char buf[8]; snprintf(buf, sizeof buf, "#%06X", (unsigned)rgb);
+    wordColorS = String(buf);
+    wordColor  = wordclock::scaleColor(RGBW32((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF, 0), wordBright);
     if (!file.startsWith("/")) file = "/" + file;
     loadFile();                                   // reload after every configuration change
     return ok;
